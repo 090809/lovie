@@ -1,0 +1,28 @@
+# Go binary
+lovie
+/cmd/gen/gen
+
+# Go test cache
+*.test
+*.out
+
+# Dependencies (main module has go.sum committed, but ignore vendor if ever added)
+vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# Test data files (can be large)
+test.jsonl
+test_large.jsonl
+*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
