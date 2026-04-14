@@ -1,6 +1,6 @@
 # lovie — Local OpenTelemetry Viewer
 
-**lovie** (**L**ocal **O**penTelemetry **Vie**wer) is a zero-dependency CLI tool for exploring [OTLP file-exporter](https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/) JSONL files. Point it at a `.jsonl` file and it spins up a local web server with a rich interactive SPA — no cloud, no config, no state.
+**lovie** (**L**ocal **O**penTelemetry **Vie**wer) is a zero-dependency CLI tool for exploring [OTLP file-exporter](https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/) JSONL, including files wrapped by `oteljsonl` compression/encryption envelopes. Point it at a `.jsonl` file and it spins up a local web server with a rich interactive SPA — no cloud, no config, no state.
 
 ---
 
@@ -38,8 +38,8 @@ Requires **Go 1.22+**.
 
 ## Usage
 
-```
-lovie <file.jsonl>
+```text
+lovie [options] <file.jsonl>
 ```
 
 **Example:**
@@ -50,13 +50,33 @@ lovie trace_output.jsonl
 # Opening browser…
 ```
 
+Encrypted `oteljsonl` input can be opened directly:
+
+```bash
+lovie -aad demo -recipient-key-id primary \
+  -recipient-private-key-hex "$PRIVATE_KEY_HEX" \
+  trace_output.jsonl
+```
+
+| Flag | Description |
+|------|-------------|
+| `-aad` | Additional authenticated data for `oteljsonl` decode |
+| `-key-hex` | 32-byte symmetric AES-256-GCM key in hex |
+| `-recipient-key-id` | Optional recipient key ID for recipient-based decode |
+| `-recipient-private-key-hex` | X25519 recipient private key in hex |
+
 The server runs until you press `Ctrl+C`.
 
 ---
 
 ## Input format
 
-lovie reads JSONL produced by the [OTLP file exporter](https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/). Each line is one of:
+lovie reads:
+
+1. [OTLP file exporter](https://opentelemetry.io/docs/specs/otel/protocol/file-exporter/) JSONL
+2. Compressed and/or encrypted `oteljsonl` envelope lines whose decoded payload is OTLP JSONL
+
+OTLP lines use one of these top-level keys:
 
 | Line type | Top-level key |
 |-----------|--------------|
@@ -64,7 +84,7 @@ lovie reads JSONL produced by the [OTLP file exporter](https://opentelemetry.io/
 | Logs | `resourceLogs` |
 | Metrics | `resourceMetrics` |
 
-Lines may arrive in any order — lovie handles out-of-order data correctly.
+Plain OTLP lines are parsed directly. `oteljsonl` envelope lines are decoded first, then parsed by the same OTLP path. Lines may arrive in any order — lovie handles out-of-order data correctly.
 
 ---
 
@@ -86,7 +106,7 @@ The embedded server exposes a lightweight JSON API used by the SPA:
 
 ## Test data generator
 
-A separate generator lives in `cmd/gen/` and produces realistic OTLP JSONL using the official OTel Go SDK with semconv v1.26.0.
+A separate generator lives in `cmd/gen/` and produces realistic OTLP-compatible JSONL using the official OTel Go SDK with semconv v1.26.0. When compression or encryption is enabled, the payload is wrapped by `oteljsonl`.
 
 ```bash
 cd cmd/gen
@@ -99,8 +119,40 @@ go run . -o ../../test.jsonl -logs 5000 -depth 4 -children 3
 | `-logs` | `5000` | Approximate number of log records |
 | `-depth` | `4` | Max span tree depth |
 | `-children` | `3` | Children per span node |
+| `-compression` | `none` | `none` or `gzip` |
+| `-aad` | `""` | Optional `oteljsonl` AAD |
+| `-key-hex` | `""` | Symmetric AES-256-GCM key in hex |
+| `-recipient-key-id` | `""` | Optional recipient key ID |
+| `-recipient-public-key-hex` | `""` | X25519 recipient public key in hex |
 
 A `-depth 5 -children 3` run produces ~364 spans and ~24 000 logs (~29 MB).
+
+Example with recipient-based encryption:
+
+```bash
+cd cmd/gen
+go run . -o ../../test.jsonl -compression gzip -aad demo \
+  -recipient-key-id primary \
+  -recipient-public-key-hex "$PUBLIC_KEY_HEX"
+```
+
+## Key helper
+
+Use the small helper in `cmd/oteljsonl-keygen` to generate an X25519 keypair and copy-paste-friendly flags:
+
+```bash
+go run ./cmd/oteljsonl-keygen
+```
+
+Sample output:
+
+```text
+key_id=ab9083fe1023c775
+public_key_hex=...
+private_key_hex=...
+cmd_gen_flags=-recipient-key-id ab9083fe1023c775 -recipient-public-key-hex ...
+lovie_flags=-recipient-key-id ab9083fe1023c775 -recipient-private-key-hex ...
+```
 
 ---
 
@@ -128,7 +180,7 @@ go build -o lovie .
 ```
 lovie <file.jsonl>
   │
-  ├── parser.go      — parallel JSONL parsing via proto/otlp + protojson
+  ├── parser.go      — OTLP parsing with optional oteljsonl envelope decode
   ├── server.go      — HTTP server, REST API, browser launch, go:embed
   ├── main.go        — CLI entry point
   │
@@ -142,7 +194,8 @@ lovie <file.jsonl>
       │   └── utils/        format, colors
       └── dist/             (embedded in binary)
 
-cmd/gen/           — standalone test data generator (separate Go module)
+cmd/gen/                 — standalone oteljsonl test data generator
+cmd/oteljsonl-keygen/    — X25519 key generation helper
 ```
 
 ---

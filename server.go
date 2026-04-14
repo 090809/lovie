@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 //go:embed web/dist
@@ -77,20 +79,24 @@ func newAPIServer(data *DisplayData) *apiServer {
 	for i, t := range data.Traces {
 		s.traceIdx[t.TraceID] = i
 	}
+
 	for i, l := range data.Logs {
 		if l.SpanID != "" {
 			s.logsBySpan[l.SpanID] = append(s.logsBySpan[l.SpanID], i)
 		}
+
 		if l.TraceID != "" {
 			s.logsByTrace[l.TraceID] = append(s.logsByTrace[l.TraceID], i)
 		}
 	}
+
 	return s
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("json encode: %v", err)
 	}
@@ -113,79 +119,103 @@ func traceSummary(t DisplayTrace) TraceSummary {
 		DurationMs: t.DurationMs,
 		SpanCount:  len(t.Spans),
 	}
+
 	spanIDs := make(map[string]bool, len(t.Spans))
+
 	for _, sp := range t.Spans {
 		spanIDs[sp.SpanID] = true
 	}
+
 	for _, sp := range t.Spans {
 		if sp.HasError {
 			sum.ErrorCount++
 		}
+
 		if sum.RootService == "" && (sp.ParentSpanID == "" || !spanIDs[sp.ParentSpanID]) {
 			sum.RootService = sp.Service
 		}
 	}
+
 	if sum.RootService == "" && len(t.Spans) > 0 {
 		sum.RootService = t.Spans[0].Service
 	}
+
 	return sum
 }
 
 func (s *apiServer) handleTraces(w http.ResponseWriter, _ *http.Request) {
 	out := make([]TraceSummary, len(s.data.Traces))
+
 	for i, t := range s.data.Traces {
 		out[i] = traceSummary(t)
 	}
+
 	writeJSON(w, out)
 }
 
 // computeDepths returns the tree depth for each span (0 = root).
 func computeDepths(spans []DisplaySpan) []int {
 	spanIdx := make(map[string]int, len(spans))
+
 	for i, sp := range spans {
 		spanIdx[sp.SpanID] = i
 	}
+
 	depths := make([]int, len(spans))
+
 	for i := range depths {
 		depths[i] = -1
 	}
+
 	var getDepth func(i int) int
+
 	getDepth = func(i int) int {
 		if depths[i] >= 0 {
 			return depths[i]
 		}
+
 		sp := spans[i]
 		if sp.ParentSpanID == "" {
 			depths[i] = 0
 			return 0
 		}
+
 		pidx, ok := spanIdx[sp.ParentSpanID]
 		if !ok {
 			depths[i] = 0
 			return 0
 		}
+
 		depths[i] = getDepth(pidx) + 1
+
 		return depths[i]
 	}
+
 	for i := range spans {
 		getDepth(i)
 	}
+
 	return depths
 }
 
 func (s *apiServer) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
 	idx, ok := s.traceIdx[id]
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
+
 		return
 	}
+
 	t := s.data.Traces[idx]
 	depths := computeDepths(t.Spans)
 	spanViews := make([]SpanView, len(t.Spans))
+
 	for i, sp := range t.Spans {
 		spanViews[i] = SpanView{DisplaySpan: sp, Depth: depths[i]}
 	}
+
 	writeJSON(w, TraceDetailResponse{
 		TraceSummary: traceSummary(t),
 		Spans:        spanViews,
@@ -207,75 +237,118 @@ func normSev(s string) string {
 	case "FATAL", "FATAL2", "FATAL3", "FATAL4":
 		return "FATAL"
 	}
+
 	return s
 }
 
+type logFilters struct {
+	offset    int
+	limit     int
+	traceID   string
+	spanID    string
+	search    string
+	sevFilter string
+}
+
 func (s *apiServer) handleLogs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	offsetStr := q.Get("offset")
-	limitStr := q.Get("limit")
-	traceID := q.Get("traceId")
-	spanID := q.Get("spanId")
-	search := strings.ToLower(q.Get("q"))
-	sevFilter := q.Get("sev")
+	filters := parseLogFilters(r.URL.Query())
+	candidates := s.logCandidates(filters)
+	filtered := s.filterLogCandidates(candidates, filters)
 
-	offset := 0
-	limit := 200
-	if offsetStr != "" {
+	writeJSON(w, LogPage{
+		Total:  len(filtered),
+		Offset: filters.offset,
+		Limit:  filters.limit,
+		Items:  s.paginateLogs(filtered, filters),
+	})
+}
+
+func parseLogFilters(q url.Values) logFilters {
+	filters := logFilters{
+		limit:     200,
+		traceID:   q.Get("traceId"),
+		spanID:    q.Get("spanId"),
+		search:    strings.ToLower(q.Get("q")),
+		sevFilter: q.Get("sev"),
+	}
+
+	if offsetStr := q.Get("offset"); offsetStr != "" {
 		if v, err := strconv.Atoi(offsetStr); err == nil {
-			offset = v
-		}
-	}
-	if limitStr != "" {
-		if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v <= 1000 {
-			limit = v
+			filters.offset = v
 		}
 	}
 
-	// Use index for fast lookup when no extra filters are active.
-	var candidates []int
+	if limitStr := q.Get("limit"); limitStr != "" {
+		if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v <= 1000 {
+			filters.limit = v
+		}
+	}
+
+	return filters
+}
+
+func (s *apiServer) logCandidates(filters logFilters) []int {
 	switch {
-	case spanID != "" && search == "" && sevFilter == "" && traceID == "":
-		candidates = s.logsBySpan[spanID]
-	case traceID != "" && spanID == "" && search == "" && sevFilter == "":
-		candidates = s.logsByTrace[traceID]
+	case filters.spanID != "" && filters.search == "" && filters.sevFilter == "" && filters.traceID == "":
+		return s.logsBySpan[filters.spanID]
+	case filters.traceID != "" && filters.spanID == "" && filters.search == "" && filters.sevFilter == "":
+		return s.logsByTrace[filters.traceID]
 	default:
-		candidates = make([]int, len(s.data.Logs))
+		candidates := make([]int, len(s.data.Logs))
+
 		for i := range s.data.Logs {
 			candidates[i] = i
 		}
-	}
 
-	var filtered []int
+		return candidates
+	}
+}
+
+func (s *apiServer) filterLogCandidates(candidates []int, filters logFilters) []int {
+	filtered := make([]int, 0, len(candidates))
+
 	for _, i := range candidates {
 		l := s.data.Logs[i]
-		if spanID != "" && l.SpanID != spanID {
+
+		if filters.spanID != "" && l.SpanID != filters.spanID {
 			continue
 		}
-		if traceID != "" && l.TraceID != traceID {
+
+		if filters.traceID != "" && l.TraceID != filters.traceID {
 			continue
 		}
-		if sevFilter != "" && normSev(l.SeverityText) != sevFilter {
+
+		if filters.sevFilter != "" && normSev(l.SeverityText) != filters.sevFilter {
 			continue
 		}
-		if search != "" && !strings.Contains(strings.ToLower(l.Body), search) {
+
+		if filters.search != "" && !strings.Contains(strings.ToLower(l.Body), filters.search) {
 			continue
 		}
+
 		filtered = append(filtered, i)
 	}
 
-	total := len(filtered)
-	end := offset + limit
-	if end > total {
-		end = total
+	return filtered
+}
+
+func (s *apiServer) paginateLogs(filtered []int, filters logFilters) []DisplayLog {
+	if filters.offset >= len(filtered) {
+		return []DisplayLog{}
 	}
-	items := make([]DisplayLog, 0)
-	if offset < total {
-		for _, i := range filtered[offset:end] {
-			items = append(items, s.data.Logs[i])
-		}
+
+	end := filters.offset + filters.limit
+	if end > len(filtered) {
+		end = len(filtered)
 	}
-	writeJSON(w, LogPage{Total: total, Offset: offset, Limit: limit, Items: items})
+
+	items := make([]DisplayLog, 0, end-filters.offset)
+
+	for _, i := range filtered[filters.offset:end] {
+		items = append(items, s.data.Logs[i])
+	}
+
+	return items
 }
 
 func (s *apiServer) handleMetrics(w http.ResponseWriter, _ *http.Request) {
@@ -292,6 +365,7 @@ func serve(data *DisplayData) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
 	addr := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
 
 	srv := newAPIServer(data)
@@ -309,6 +383,7 @@ func serve(data *DisplayData) error {
 		if path == "" {
 			path = "index.html"
 		}
+
 		f, err := sub.Open(path)
 		if err != nil {
 			// Fall back to index.html for client-side routing.
@@ -318,11 +393,14 @@ func serve(data *DisplayData) error {
 				return
 			}
 			defer f2.Close()
+
 			st, _ := f2.Stat()
 			http.ServeContent(w, r, "index.html", st.ModTime(), f2.(io.ReadSeeker))
+
 			return
 		}
 		defer f.Close()
+
 		st, _ := f.Stat()
 		if st.IsDir() {
 			f2, err2 := sub.Open(path + "/index.html")
@@ -331,17 +409,24 @@ func serve(data *DisplayData) error {
 				return
 			}
 			defer f2.Close()
+
 			st2, _ := f2.Stat()
 			http.ServeContent(w, r, "index.html", st2.ModTime(), f2.(io.ReadSeeker))
+
 			return
 		}
+
 		http.ServeContent(w, r, path, st.ModTime(), f.(io.ReadSeeker))
 	})
 
 	fmt.Fprintf(os.Stderr, "🌐 Serving at %s\n", addr)
 	openBrowser(addr)
 
-	httpSrv := &http.Server{Handler: mux}
+	httpSrv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("server error: %v", err)
@@ -349,26 +434,57 @@ func serve(data *DisplayData) error {
 	}()
 
 	quit := make(chan os.Signal, 1)
+
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
 	<-quit
 	fmt.Fprintln(os.Stderr, "\nBye 👋")
+
 	return nil
 }
 
-func openBrowser(url string) {
-	var cmd *exec.Cmd
+func openBrowser(target string) {
+	var err error
+
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		err = startDarwinBrowser(target)
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		err = startLinuxBrowser(target)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		err = startWindowsBrowser(target)
 	default:
-		fmt.Fprintf(os.Stderr, "Open your browser at %s\n", url)
+		fmt.Fprintf(os.Stderr, "Open your browser at %s\n", target)
+
 		return
 	}
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Open your browser at %s\n", url)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Open your browser at %s\n", target)
 	}
+}
+
+func startDarwinBrowser(target string) error {
+	//nolint:gosec // The target is the locally constructed listener URL.
+	cmd := exec.Command("open")
+	cmd.Args = append(cmd.Args, target)
+
+	return cmd.Start()
+}
+
+func startLinuxBrowser(target string) error {
+	//nolint:gosec // The target is the locally constructed listener URL.
+	cmd := exec.Command("xdg-open")
+	cmd.Args = append(cmd.Args, target)
+
+	return cmd.Start()
+}
+
+func startWindowsBrowser(target string) error {
+	//nolint:gosec // The target is the locally constructed listener URL.
+	cmd := exec.Command("rundll32")
+	cmd.Args = append(cmd.Args, "url.dll,FileProtocolHandler", target)
+
+	return cmd.Start()
 }

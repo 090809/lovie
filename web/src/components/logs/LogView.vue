@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
+import LogDetail from './LogDetail.vue'
 import { api } from '../../api/client'
 import type { DisplayLog } from '../../types'
 import { fmtTime, normSev } from '../../utils/format'
 import { sevColors } from '../../utils/colors'
 
 const emit = defineEmits<{
-  jumpToTrace: [traceId: string, spanId: string]
+  jumpToTrace: [traceId: string, spanId?: string]
 }>()
 
 const props = defineProps<{
@@ -24,12 +25,14 @@ const loading = ref(false)
 const q = ref('')
 const sev = ref('ALL')
 const jumpedSpanId = ref<string | null>(null)
+const selectedLogIndex = ref<number | null>(null)
 let debounce: ReturnType<typeof setTimeout>
 
 async function load(reset = false) {
   if (reset) {
     offset.value = 0
     logs.value = []
+    selectedLogIndex.value = null
   }
   loading.value = true
   try {
@@ -82,6 +85,14 @@ function clearJump() {
   jumpedSpanId.value = null
   load(true)
 }
+
+function toggleLog(index: number) {
+  selectedLogIndex.value = selectedLogIndex.value === index ? null : index
+}
+
+function handleJumpToTrace(traceId: string, spanId?: string) {
+  emit('jumpToTrace', traceId, spanId)
+}
 </script>
 
 <template>
@@ -109,38 +120,31 @@ function clearJump() {
           <th>Timestamp</th>
           <th>Service</th>
           <th>Message</th>
-          <th>Trace</th>
         </tr>
       </thead>
       <tbody>
-        <tr
-          v-for="(log, i) in logs"
-          :key="i"
-          class="log-row"
-          :class="{ highlighted: jumpedSpanId && log.spanId === jumpedSpanId }"
-        >
-          <td>
-            <span
-              class="tag"
-              :style="{ background: sevColors(normSev(log.severityText)).bg, color: sevColors(normSev(log.severityText)).fg }"
-            >{{ normSev(log.severityText) }}</span>
-          </td>
-          <td class="mono">{{ fmtTime(log.timeMs) }}</td>
-          <td>{{ log.service }}</td>
-          <td class="log-body-cell">{{ log.body }}</td>
-          <td>
-            <a
-              v-if="log.traceId"
-              href="#"
-              @click.prevent="emit('jumpToTrace', log.traceId, log.spanId ?? '')"
-              class="jump-link mono"
-              :title="`Go to span ${log.spanId ?? ''} in trace ${log.traceId}`"
-            >
-              <span>{{ log.traceId.slice(0, 8) }}…</span>
-              <span class="jump-icon">↗</span>
-            </a>
-          </td>
-        </tr>
+        <template v-for="(log, i) in logs" :key="i">
+          <tr
+            class="log-row"
+            :class="{ highlighted: jumpedSpanId && log.spanId === jumpedSpanId, selected: selectedLogIndex === i }"
+            @click="toggleLog(i)"
+          >
+            <td>
+              <span
+                class="tag"
+                :style="{ background: sevColors(normSev(log.severityText)).bg, color: sevColors(normSev(log.severityText)).fg }"
+              >{{ normSev(log.severityText) }}</span>
+            </td>
+            <td class="mono">{{ fmtTime(log.timeMs) }}</td>
+            <td>{{ log.service }}</td>
+            <td class="log-body-cell">{{ log.body }}</td>
+          </tr>
+          <LogDetail
+            v-if="selectedLogIndex === i"
+            :log="log"
+            @jumpToTrace="handleJumpToTrace"
+          />
+        </template>
       </tbody>
     </table>
 
@@ -180,10 +184,8 @@ function clearJump() {
   vertical-align: top;
 }
 .log-row:hover td { background: var(--bg2); }
+.log-row.selected td { background: #1a2540; }
 .log-body-cell { word-break: break-word; max-width: 600px; }
-.jump-link { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--accent); text-decoration: none; }
-.jump-link:hover .jump-icon { opacity: 1; }
-.jump-icon { opacity: 0.5; font-size: 12px; }
 
 .span-filter-banner {
   display: flex;

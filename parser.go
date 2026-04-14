@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"runtime"
 	"sort"
@@ -18,6 +19,8 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"lovie/oteljsonl"
 )
 
 // ── proto helpers ─────────────────────────────────────────────────────────────
@@ -28,9 +31,11 @@ func nanoToMs(ns uint64) float64 { return float64(ns) / 1e6 }
 
 func attrToMap(attrs []*commonpb.KeyValue) map[string]interface{} {
 	m := make(map[string]interface{}, len(attrs))
+
 	for _, kv := range attrs {
 		m[kv.Key] = anyVal(kv.Value)
 	}
+
 	return m
 }
 
@@ -38,6 +43,7 @@ func anyVal(v *commonpb.AnyValue) interface{} {
 	if v == nil {
 		return nil
 	}
+
 	switch x := v.Value.(type) {
 	case *commonpb.AnyValue_StringValue:
 		return x.StringValue
@@ -51,19 +57,24 @@ func anyVal(v *commonpb.AnyValue) interface{} {
 		if x.ArrayValue == nil {
 			return nil
 		}
+
 		arr := make([]interface{}, len(x.ArrayValue.Values))
+
 		for i, av := range x.ArrayValue.Values {
 			arr[i] = anyVal(av)
 		}
+
 		return arr
 	case *commonpb.AnyValue_KvlistValue:
 		if x.KvlistValue == nil {
 			return nil
 		}
+
 		return attrToMap(x.KvlistValue.Values)
 	case *commonpb.AnyValue_BytesValue:
 		return hex.EncodeToString(x.BytesValue)
 	}
+
 	return nil
 }
 
@@ -71,6 +82,7 @@ func resourceService(r *resourcepb.Resource) string {
 	if r == nil {
 		return "unknown"
 	}
+
 	for _, kv := range r.Attributes {
 		if kv.Key == "service.name" {
 			if sv, ok := kv.Value.GetValue().(*commonpb.AnyValue_StringValue); ok {
@@ -78,6 +90,7 @@ func resourceService(r *resourcepb.Resource) string {
 			}
 		}
 	}
+
 	return "unknown"
 }
 
@@ -188,6 +201,7 @@ func parseLine(line []byte) parsedLine {
 			result.metrics = req.ResourceMetrics
 		}
 	}
+
 	return result
 }
 
@@ -197,29 +211,44 @@ func firstKey(data []byte) string {
 	if i < 0 {
 		return ""
 	}
+
 	j := bytes.IndexByte(data[i+1:], '"')
 	if j < 0 {
 		return ""
 	}
+
 	return string(data[i+1 : i+1+j])
 }
 
 // ── parser ────────────────────────────────────────────────────────────────────
 
-func parseOTLP(r io.Reader) (*DisplayData, error) {
+func parseOTLP(r io.Reader, decryptConfig oteljsonl.DecryptConfig) (*DisplayData, error) {
 	// Read all lines first (IO-bound, single goroutine)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 16*1024*1024), 16*1024*1024)
+
 	var lines [][]byte
+
+	lineNumber := 0
 	for scanner.Scan() {
+		lineNumber++
+
 		b := scanner.Bytes()
 		if len(b) == 0 {
 			continue
 		}
+
 		cp := make([]byte, len(b))
 		copy(cp, b)
-		lines = append(lines, cp)
+
+		decoded, err := oteljsonl.DecodeLine(cp, decryptConfig)
+		if err != nil {
+			return nil, fmt.Errorf("decode line %d: %w", lineNumber, err)
+		}
+
+		lines = append(lines, decoded)
 	}
+
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
@@ -232,27 +261,36 @@ func parseOTLP(r io.Reader) (*DisplayData, error) {
 
 	results := make([]parsedLine, len(lines))
 	work := make(chan int, len(lines))
+
 	for i := range lines {
 		work <- i
 	}
+
 	close(work)
 
 	var wg sync.WaitGroup
+
 	for w := 0; w < nWorkers; w++ {
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
+
 			for i := range work {
 				results[i] = parseLine(lines[i])
 			}
 		}()
 	}
+
 	wg.Wait()
 
 	// Merge results (preserving order for determinism)
-	var allSpans []*tracepb.ResourceSpans
-	var allLogs []*logspb.ResourceLogs
-	var allMetrics []*metricspb.ResourceMetrics
+	var (
+		allSpans   []*tracepb.ResourceSpans
+		allLogs    []*logspb.ResourceLogs
+		allMetrics []*metricspb.ResourceMetrics
+	)
+
 	for _, r := range results {
 		allSpans = append(allSpans, r.spans...)
 		allLogs = append(allLogs, r.logs...)
@@ -260,9 +298,19 @@ func parseOTLP(r io.Reader) (*DisplayData, error) {
 	}
 
 	data := &DisplayData{}
+
 	data.Traces = buildTraces(allSpans)
 	data.Logs = buildLogs(allLogs)
 	data.Metrics = buildMetrics(allMetrics)
+
+	sort.Slice(data.Traces, func(i, j int) bool {
+		return data.Traces[i].StartMs > data.Traces[j].StartMs
+	})
+
+	sort.Slice(data.Logs, func(i, j int) bool {
+		return data.Logs[i].TimeMs < data.Logs[j].TimeMs
+	})
+
 	return data, nil
 }
 
@@ -276,8 +324,10 @@ type flatSpan struct {
 
 func buildTraces(rss []*tracepb.ResourceSpans) []DisplayTrace {
 	byTrace := map[string][]flatSpan{}
+
 	for _, rs := range rss {
 		svc := resourceService(rs.Resource)
+
 		for _, ss := range rs.ScopeSpans {
 			for _, sp := range ss.Spans {
 				tid := hexID(sp.TraceId)
@@ -285,23 +335,34 @@ func buildTraces(rss []*tracepb.ResourceSpans) []DisplayTrace {
 			}
 		}
 	}
-	var traces []DisplayTrace
+
+	traces := make([]DisplayTrace, 0, len(byTrace))
+
 	for tid, flat := range byTrace {
 		traces = append(traces, buildSingleTrace(tid, flat))
 	}
+
 	sort.Slice(traces, func(i, j int) bool {
 		return traces[i].StartMs > traces[j].StartMs
 	})
+
 	return traces
 }
 
 func buildSingleTrace(traceID string, flat []flatSpan) DisplayTrace {
-	spanByID := map[string]*DisplaySpan{}
-	var dspans []DisplaySpan
+	dspans := buildDisplaySpans(traceID, flat)
+	assignSpanDepths(dspans)
+
+	return summarizeTrace(traceID, dspans)
+}
+
+func buildDisplaySpans(traceID string, flat []flatSpan) []DisplaySpan {
+	dspans := make([]DisplaySpan, 0, len(flat))
 
 	for _, f := range flat {
 		sp := f.sp
 		isError := sp.Status != nil && sp.Status.Code == tracepb.Status_STATUS_CODE_ERROR
+
 		ds := DisplaySpan{
 			TraceID:      traceID,
 			SpanID:       hexID(sp.SpanId),
@@ -321,6 +382,7 @@ func buildSingleTrace(traceID string, flat []flatSpan) DisplayTrace {
 		if ds.ParentSpanID == "0000000000000000" || ds.ParentSpanID == "" {
 			ds.ParentSpanID = ""
 		}
+
 		for _, ev := range sp.Events {
 			ds.Events = append(ds.Events, DisplayEvent{
 				TimeMs:     nanoToMs(ev.TimeUnixNano),
@@ -328,44 +390,56 @@ func buildSingleTrace(traceID string, flat []flatSpan) DisplayTrace {
 				Attributes: attrToMap(ev.Attributes),
 			})
 		}
+
 		dspans = append(dspans, ds)
-		spanByID[ds.SpanID] = &dspans[len(dspans)-1]
 	}
 
 	sort.Slice(dspans, func(i, j int) bool {
 		return dspans[i].StartMs < dspans[j].StartMs
 	})
-	// Rebuild index after sort (pointers changed)
-	spanByID = make(map[string]*DisplaySpan, len(dspans))
-	for i := range dspans {
-		spanByID[dspans[i].SpanID] = &dspans[i]
-	}
 
-	// Assign depths via BFS from roots
+	return dspans
+}
+
+func assignSpanDepths(dspans []DisplaySpan) {
+	spanByID := indexSpans(dspans)
+
 	for i := range dspans {
 		ds := &dspans[i]
-		if ds.ParentSpanID == "" || spanByID[ds.ParentSpanID] == nil {
+
+		if isRootSpan(*ds, spanByID) {
 			ds.Depth = 0
-			assignDepths(ds, spanByID, dspans)
+			assignDepths(ds, dspans)
 		}
 	}
+}
 
-	var startMs, endMs float64
-	svcSet := map[string]struct{}{}
-	hasError := false
-	rootName := traceID
+func summarizeTrace(traceID string, dspans []DisplaySpan) DisplayTrace {
+	spanByID := indexSpans(dspans)
+
+	var (
+		startMs, endMs float64
+		svcSet         = map[string]struct{}{}
+		hasError       bool
+		rootName       = traceID
+	)
+
 	for i, ds := range dspans {
 		svcSet[ds.Service] = struct{}{}
+
 		if ds.HasError {
 			hasError = true
 		}
+
 		if i == 0 || ds.StartMs < startMs {
 			startMs = ds.StartMs
 		}
+
 		if ds.EndMs > endMs {
 			endMs = ds.EndMs
 		}
-		if ds.ParentSpanID == "" || spanByID[ds.ParentSpanID] == nil {
+
+		if isRootSpan(ds, spanByID) {
 			rootName = ds.Name
 		}
 	}
@@ -374,6 +448,7 @@ func buildSingleTrace(traceID string, flat []flatSpan) DisplayTrace {
 	for s := range svcSet {
 		svcs = append(svcs, s)
 	}
+
 	sort.Strings(svcs)
 
 	return DisplayTrace{
@@ -388,13 +463,28 @@ func buildSingleTrace(traceID string, flat []flatSpan) DisplayTrace {
 	}
 }
 
-func assignDepths(parent *DisplaySpan, byID map[string]*DisplaySpan, all []DisplaySpan) {
+func indexSpans(dspans []DisplaySpan) map[string]*DisplaySpan {
+	spanByID := make(map[string]*DisplaySpan, len(dspans))
+
+	for i := range dspans {
+		spanByID[dspans[i].SpanID] = &dspans[i]
+	}
+
+	return spanByID
+}
+
+func isRootSpan(ds DisplaySpan, spanByID map[string]*DisplaySpan) bool {
+	return ds.ParentSpanID == "" || spanByID[ds.ParentSpanID] == nil
+}
+
+func assignDepths(parent *DisplaySpan, all []DisplaySpan) {
 	for i := range all {
 		child := &all[i]
+
 		if child.ParentSpanID == parent.SpanID && child.SpanID != parent.SpanID {
 			if child.Depth == 0 && child != parent {
 				child.Depth = parent.Depth + 1
-				assignDepths(child, byID, all)
+				assignDepths(child, all)
 			}
 		}
 	}
@@ -404,15 +494,18 @@ func assignDepths(parent *DisplaySpan, byID map[string]*DisplaySpan, all []Displ
 
 func buildLogs(rls []*logspb.ResourceLogs) []DisplayLog {
 	var out []DisplayLog
+
 	for _, rl := range rls {
 		svc := resourceService(rl.Resource)
 		res := attrToMap(rl.Resource.GetAttributes())
+
 		for _, sl := range rl.ScopeLogs {
 			for _, lr := range sl.LogRecords {
 				sev := lr.SeverityText
 				if sev == "" {
 					sev = sevNumberToText(int(lr.SeverityNumber))
 				}
+
 				out = append(out, DisplayLog{
 					TimeMs:         nanoToMs(lr.TimeUnixNano),
 					SeverityText:   sev,
@@ -427,9 +520,11 @@ func buildLogs(rls []*logspb.ResourceLogs) []DisplayLog {
 			}
 		}
 	}
+
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].TimeMs < out[j].TimeMs
 	})
+
 	return out
 }
 
@@ -437,6 +532,7 @@ func bodyToString(v *commonpb.AnyValue) string {
 	if v == nil {
 		return ""
 	}
+
 	switch x := v.Value.(type) {
 	case *commonpb.AnyValue_StringValue:
 		return x.StringValue
@@ -445,6 +541,7 @@ func bodyToString(v *commonpb.AnyValue) string {
 		if s == nil {
 			return ""
 		}
+
 		switch sv := s.(type) {
 		case string:
 			return sv
@@ -477,14 +574,17 @@ func sevNumberToText(n int) string {
 
 func buildMetrics(rms []*metricspb.ResourceMetrics) []DisplayMetric {
 	var out []DisplayMetric
+
 	for _, rm := range rms {
 		svc := resourceService(rm.Resource)
+
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
 				out = append(out, convertMetric(m, svc))
 			}
 		}
 	}
+
 	return out
 }
 
@@ -527,17 +627,20 @@ func convertMetric(m *metricspb.Metric, svc string) DisplayMetric {
 	default:
 		dm.Type = "unknown"
 	}
+
 	return dm
 }
 
 func gaugeDP(dp *metricspb.NumberDataPoint) DisplayDataPoint {
 	var val interface{}
+
 	switch v := dp.Value.(type) {
 	case *metricspb.NumberDataPoint_AsDouble:
 		val = v.AsDouble
 	case *metricspb.NumberDataPoint_AsInt:
 		val = v.AsInt
 	}
+
 	return DisplayDataPoint{
 		TimeMs:     nanoToMs(dp.TimeUnixNano),
 		Value:      val,

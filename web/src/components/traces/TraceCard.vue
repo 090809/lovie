@@ -180,9 +180,12 @@ function spanWidth(sp: DisplaySpan): string {
 }
 
 function eventLeft(sp: DisplaySpan, evTimeMs: number): string {
-  if (sp.durationMs < 0.001) return '0%'
-  const pct = (evTimeMs - sp.startMs) / sp.durationMs * 100
-  return Math.min(Math.max(pct, 0), 100).toFixed(2) + '%'
+  if (sp.durationMs <= 0) return '50%'
+
+  const eventPct = ((evTimeMs - sp.startMs) / sp.durationMs) * 100
+  const clampedPct = Math.min(Math.max(eventPct, 0), 100)
+
+  return clampedPct.toFixed(2) + '%'
 }
 
 function selectSpan(sp: DisplaySpan) {
@@ -239,28 +242,34 @@ function selectSpan(sp: DisplaySpan) {
           <div class="span-bar-col">
             <div class="span-bar-track">
               <div
-                class="span-bar"
+                class="span-bar-box"
                 :style="{
                   left: spanLeft(sp),
                   width: spanWidth(sp),
-                  background: svcColor(sp.service),
-                  opacity: sp.hasError ? 1 : 0.8,
-                  outline: sp.hasError ? '1px solid #f85149' : 'none',
                 }"
-                :title="sp.name + ' · ' + fmtDur(sp.durationMs)"
-              ></div>
+              >
+                <div
+                  class="span-bar"
+                  :style="{
+                    background: svcColor(sp.service),
+                    opacity: sp.hasError ? 1 : 0.8,
+                    boxShadow: sp.hasError ? 'inset 0 0 0 1px #f85149, inset 0 0 10px rgba(248, 81, 73, 0.35)' : 'none',
+                  }"
+                  :title="sp.name + ' · ' + fmtDur(sp.durationMs)"
+                ></div>
+                <!-- Event markers -->
+                <div
+                  v-for="(ev, i) in (sp.events ?? [])"
+                  :key="i"
+                  class="event-marker"
+                  :style="{ left: eventLeft(sp, ev.timeMs) }"
+                  :title="ev.name + ' @ ' + fmtTime(ev.timeMs)"
+                >◆</div>
+              </div>
               <span
                 class="span-bar-label"
                 :style="spanLabelStyle(sp)"
               >{{ fmtDur(sp.durationMs) }}</span>
-              <!-- Event markers -->
-              <div
-                v-for="(ev, i) in (sp.events ?? [])"
-                :key="i"
-                class="event-marker"
-                :style="{ left: eventLeft(sp, ev.timeMs) }"
-                :title="ev.name + ' @ ' + fmtTime(ev.timeMs)"
-              >◆</div>
             </div>
           </div>
         </div>
@@ -343,13 +352,20 @@ function selectSpan(sp: DisplaySpan) {
 .span-bar-col { flex: 1; height: 100%; padding: 4px 8px; }
 .span-bar-track { position: relative; height: 100%; }
 
-.span-bar {
+.span-bar-box {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
   height: 14px;
-  border-radius: 3px;
   min-width: 3px;
+  overflow: hidden;
+}
+
+.span-bar {
+  position: absolute;
+  inset: 0;
+  height: 14px;
+  border-radius: 3px;
 }
 .span-bar-label {
   position: absolute;
@@ -366,6 +382,7 @@ function selectSpan(sp: DisplaySpan) {
   top: 50%;
   transform: translate(-50%, -50%);
   font-size: 9px;
+  line-height: 1;
   color: #f0883e;
   cursor: default;
   z-index: 2;

@@ -1,4 +1,4 @@
-module lovie/gen
+module lovie/oteljsonl
 
 go 1.26.1
 
@@ -10,7 +10,8 @@ require (
 	go.opentelemetry.io/otel/sdk/log v0.19.0
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
-	lovie/oteljsonl v0.0.0
+	go.opentelemetry.io/proto/otlp v1.8.0
+	google.golang.org/protobuf v1.36.10
 )
 
 require (
@@ -20,14 +21,10 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/proto/otlp v1.8.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250825161204-c5933d9347a5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250825161204-c5933d9347a5 // indirect
 	google.golang.org/grpc v1.75.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )
-
-replace lovie/oteljsonl => ../../oteljsonl
