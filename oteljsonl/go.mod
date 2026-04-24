@@ -1,4 +1,4 @@
-module lovie/oteljsonl
+module github.com/090809/lovie/oteljsonl
 
 go 1.26.1
 

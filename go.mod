@@ -1,4 +1,4 @@
-module lovie
+module github.com/090809/lovie
 
 go 1.26.1
 
