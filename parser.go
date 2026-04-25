@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/090809/oteljsonl"
 	colllogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	colltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -19,8 +20,6 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protojson"
-
-	"lovie/oteljsonl"
 )
 
 // ── proto helpers ─────────────────────────────────────────────────────────────

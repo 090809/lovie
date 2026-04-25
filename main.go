@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"lovie/oteljsonl"
+	"github.com/090809/oteljsonl"
 )
 
 var version = "dev"

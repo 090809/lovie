@@ -12,7 +12,7 @@ import (
 	tracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"lovie/oteljsonl"
+	"github.com/090809/oteljsonl"
 )
 
 func TestParseOTLPOtelJSONL(t *testing.T) {

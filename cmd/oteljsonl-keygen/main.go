@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"lovie/oteljsonl"
+	"github.com/090809/oteljsonl"
 )
 
 func main() {
