@@ -202,4 +202,4 @@ cmd/oteljsonl-keygen/    — X25519 key generation helper
 
 ## License
 
-MIT
+Apache-2.0
